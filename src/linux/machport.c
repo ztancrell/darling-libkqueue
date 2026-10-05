@@ -107,6 +107,11 @@ static long raw_syscall6(long nr, long a1, long a2, long a3, long a4, long a5, l
 static long raw_recvfrom(int fd, void* buf, unsigned long len) {
     return raw_syscall6(RAW_NR_recvfrom, fd, (long)buf, len, 0, 0, 0);
 }
+#define RAW_MSG_DONTWAIT 0x40
+#define RAW_EAGAIN 11
+static long raw_recvfrom_nowait(int fd, void* buf, unsigned long len) {
+    return raw_syscall6(RAW_NR_recvfrom, fd, (long)buf, len, RAW_MSG_DONTWAIT, 0, 0);
+}
 static long raw_sendto(int fd, const void* buf, unsigned long len) {
     return raw_syscall6(RAW_NR_sendto, fd, (long)buf, len, 0, 0, 0);
 }
@@ -142,8 +147,15 @@ evfilt_machport_copyout(struct kevent64_s *dst, struct knote *src, void *ptr)
 	}
 
 	// first, read the notification (RAW recvfrom, since kn_dupfd is a raw Linux socket)
-	rv = (int)raw_recvfrom(src->kdata.kn_dupfd, &notification, sizeof(notification));
+	// Without waiting: epoll is level-triggered, so several threads polling this kqueue wake up
+	// for one notification. We are called with the kqueue locked; the thread that lost the race
+	// would otherwise sit in this read for good and block everyone else using the kqueue.
+	rv = (int)raw_recvfrom_nowait(src->kdata.kn_dupfd, &notification, sizeof(notification));
 	KQ_DLOG("machport_copyout: RAW recvfrom rv=%d errno=%d\n", rv, errno);
+	if (rv == -RAW_EAGAIN) {
+		dst->filter = EVFILT_DROP;
+		return 0;
+	}
 	if (rv < 0) {
 		dbg_printf("evfilt_machport_copyout() reading notification failed: %d (%s)", errno, strerror(errno));
 		return -1;
